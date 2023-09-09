@@ -1,0 +1,90 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-ownership-change-job
+  namespace: parasoft-dtp-namespace
+spec:
+  template:
+    spec:
+      containers:
+      - name: mysql-ownership-change-container
+        image: busybox:latest
+        command: ["sh", "-c", "chown -R 999:999 /var/lib/mysql"]
+        volumeMounts:
+          - name: mysql-data
+            mountPath: /var/lib/mysql
+      restartPolicy: Never
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-data-pvc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-db
+  namespace: parasoft-dtp-namespace
+  labels:
+    app: mysql-db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-db
+  template:
+    metadata:
+      labels:
+        app: mysql-db
+    spec:
+      volumes:
+        - name: mysql-data
+          persistentVolumeClaim:
+            claimName: mysql-data-pvc
+      containers:
+        - name: mysql-db
+          image: mariadb:10.7
+          resources:
+            requests:
+              memory: 64Mi
+              cpu: 100m
+            limits:
+              memory: 256Mi
+              cpu: 200m
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - mountPath: "/var/lib/mysql"
+              name: mysql-data
+          env:
+            - name: MARIADB_USER
+              value: 'parasoft'
+            - name: MARIADB_PASSWORD
+              value: 'Parolka1'
+            - name: MARIADB_ROOT_PASSWORD
+              value: 'Parolka2'
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+      restartPolicy: Always
+      serviceAccountName: parasoft-account
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-db
+  namespace: parasoft-dtp-namespace
+spec:
+  selector:
+    app: mysql-db
+  ports:
+    - port: 3306
+      targetPort: 3306

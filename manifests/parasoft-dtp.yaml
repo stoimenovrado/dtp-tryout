@@ -1,0 +1,173 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ownership-change-job
+  namespace: parasoft-dtp-namespace
+spec:
+  template:
+    spec:
+      containers:
+      - name: ownership-change-container
+        image: busybox:latest
+        command: ["sh", "-c", "chown -R 1000:1000 /usr/local/parasoft/data"]
+        volumeMounts:
+          - name: dtp-data
+            mountPath: /usr/local/parasoft/data
+      restartPolicy: Never
+      volumes:
+        - name: dtp-data
+          persistentVolumeClaim:
+            claimName: dtp-data-pvc
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dtp
+  namespace: parasoft-dtp-namespace
+  labels:
+    app: DTP
+spec:
+  volumes:
+    - name: dtp-data
+      persistentVolumeClaim:
+        claimName: dtp-data-pvc
+  securityContext:
+    runAsNonRoot: true
+  containers:
+    - name: dtp-server
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault   
+      image: parasoft/dtp-extension-designer
+      imagePullPolicy: Always
+      env:
+        - name: PARASOFT_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: PARASOFT_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      args: ["--run", "dtp"]
+      ports:
+        - name: "http-server"
+          containerPort: 8080
+        - name: "https-server"
+          containerPort: 8443
+      volumeMounts:
+        - mountPath: "/usr/local/parasoft/data"
+          name: dtp-data
+      livenessProbe:
+        exec:
+          command:
+          - healthcheck.sh
+          - --verify
+          - dtp
+        initialDelaySeconds: 300
+        periodSeconds: 180
+        timeoutSeconds: 120
+        failureThreshold: 5
+    - name: data-collector
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault   
+      image: parasoft/dtp-extension-designer
+      imagePullPolicy: Always
+      env:
+        - name: JAVA_DC_CONFIG_ARGS
+          value: "-Dcom.parasoft.sdm.dc.license.License.debug=true"
+      args: ["--run", "datacollector", "--no-copy-data"]
+      ports:
+        - containerPort: 8082
+      volumeMounts:
+        - mountPath: "/usr/local/parasoft/data"
+          name: dtp-data
+      livenessProbe:
+        exec:
+          command:
+          - healthcheck.sh
+          - --verify
+          - datacollector
+        initialDelaySeconds: 300
+        periodSeconds: 180
+        timeoutSeconds: 120
+    - name: extension-designer
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      image: parasoft/dtp-extension-designer
+      imagePullPolicy: Always
+      args: ["--run", "dtpservices"]
+      ports:
+        - containerPort: 8314
+      volumeMounts:
+        - mountPath: "/usr/local/parasoft/data"
+          name: dtp-data
+      livenessProbe:
+        exec:
+          command:
+          - healthcheck.sh
+          - --verify
+          - dtpservices
+        initialDelaySeconds: 300
+        periodSeconds: 180
+        timeoutSeconds: 120
+        failureThreshold: 5
+  restartPolicy: Always
+  serviceAccountName: parasoft-account
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dtp
+  namespace: parasoft-dtp-namespace
+spec:
+  selector:
+    app: DTP
+  ports:
+    - name: "http-server"
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: "data-collector"
+      protocol: TCP
+      port: 8082
+      targetPort: 8082
+    - name: "https-server"
+      protocol: TCP
+      port: 8443
+      targetPort: 8443
+    - name: "extension-designer"
+      protocol: TCP
+      port: 8314
+      targetPort: 8314
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dtp-external
+  namespace: parasoft-dtp-namespace
+spec:
+  type: LoadBalancer
+  selector:
+    app: DTP
+  ports:
+    - port: 8080
+      name: "http-server"
+    - port: 8082
+      name: "data-collector"
+    - port: 8443
+      name: "https-server"
+    - port: 8314
+      name: "extension-designer"
+

@@ -1,0 +1,124 @@
+variables:
+  nodeImage: "ubuntu-latest"
+  projectURL: "@dev.azure.com/radoslavstoimenov0429/parasoft-dtp/_git/parasoft-dtp"
+  resourceGroup: 'Custom-project-k8s'
+  clusterName: 'k8s-test-aks1'
+  azureSubs: 'Visual Studio Subscription RadoslvSt(14ef8d49-a786-46b6-8578-c2f9cfc5efd6)'
+
+stages:
+- stage: Deploy
+  displayName: Deploy the K8S DTP cluster, configure the connection to the DB, Test if the DTP app is running.
+  jobs:
+  - job: Deploy_configure_test
+    displayName: Build, Test and Push to registry
+    pool:
+      vmImage: $(nodeImage)
+    steps:
+    - task: AzureKeyVault@2
+      inputs:
+        azureSubscription: 'ACKV'
+        KeyVaultName: 'kvlt-radslv'
+        SecretsFilter: '*'
+        RunAsPreJob: true
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubs)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          sed -i "s|replacement-url-here|https:\/\/\$(for-argo-cd)\$(projectURL)|" argocd.yaml
+          az aks get-credentials --resource-group $(resourceGroup) --overwrite-existing --name $(clusterName)
+          kubectl delete -f argocd.yaml -n argocd || true
+          kubectl delete ns parasoft-dtp-namespace || true
+          kubectl apply -f argocd.yaml -n argocd
+      displayName: Run the DTP cluster
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubs)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group $(resourceGroup) --overwrite-existing --name $(clusterName)
+          max_attempts=30
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt: Testing connection to DTP ...";
+            if kubectl logs dtp -n parasoft-dtp-namespace -c dtp-server | grep -q "Checking if port 8080 is available... done"; then
+              echo "... connection test succeeded. DTP App is running.";
+              break;
+            else
+              echo "... connection test failed. Sleep for 5s and retry.";
+              sleep 5;
+            fi
+            attempt=$((attempt + 1))
+          done
+          if [ $attempt -gt $max_attempts ]; then
+            echo "Maximum retry attempts reached. Unable to establish connection."
+          fi
+      displayName: Wait for DTP app to become online
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubs)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group $(resourceGroup) --overwrite-existing --name $(clusterName)
+          DB_POD_NAME=$(kubectl get pods -n parasoft-dtp-namespace -l app=mysql-db -o jsonpath='{.items[0].metadata.name}')
+          max_attempts=30
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt: Testing connection to the DB ...";
+            if kubectl logs $DB_POD_NAME -n parasoft-dtp-namespace | grep -q "port: 3306"; then
+              echo "... connection test succeeded. DB is running.";
+              break;
+            else
+              echo "... connection test failed. Sleep for 5s and retry.";
+              sleep 5;
+            fi
+            attempt=$((attempt + 1))
+          done
+          if [ $attempt -gt $max_attempts ]; then
+            echo "Maximum retry attempts reached. Unable to establish connection."
+          fi
+      displayName: Wait for DB container to become online
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubs)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group $(resourceGroup) --overwrite-existing --name $(clusterName)
+          kubectl exec dtp -n parasoft-dtp-namespace -c dtp-server -- curl -o /usr/local/parasoft/data/lib/thirdparty/mysql-connector-java-8.0.28.jar https://repo1.maven.org/maven2/mysql/mysql-connector-java/8.0.28/mysql-connector-java-8.0.28.jar
+          DB_POD_NAME=$(kubectl get pods -n parasoft-dtp-namespace -l app=mysql-db -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec dtp -n parasoft-dtp-namespace -c dtp-server -- cat dtp/grs/db/dtp/mysql/create.sql | kubectl exec -i $DB_POD_NAME -n parasoft-dtp-namespace -- mysql -uroot -p$(db-test-pass)
+          kubectl exec dtp -n parasoft-dtp-namespace -c dtp-server -- sed -i "s|<url>jdbc:mysql://localhost:3306/DTP</url>|<url>jdbc:mysql://mysql-db.parasoft-dtp-namespace:3306/DTP</url>|" /usr/local/parasoft/data/conf/PSTRootConfig.xml
+          kubectl delete pod dtp -n parasoft-dtp-namespace
+      displayName: Configure the DB
+
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: $(azureSubs)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az aks get-credentials --resource-group $(resourceGroup) --overwrite-existing --name $(clusterName)
+          max_attempts=30
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            echo "Attempt $attempt: Testing connection to DTP ...";
+            if kubectl exec dtp -n parasoft-dtp-namespace -c dtp-server -- sh -c 'curl --write-out "%{http_code}" --silent --output /dev/null http://localhost:8080 | grep -q 200'; then
+              echo "... connection test succeeded. DTP App is running.";
+              break;
+            else
+              echo "... connection test failed. Sleep for 5s and retry.";
+              sleep 5;
+            fi
+            attempt=$((attempt + 1))
+          done
+          if [ $attempt -gt $max_attempts ]; then
+            echo "Maximum retry attempts reached. Unable to establish connection."
+          fi
+      displayName: Test if the app is accessible
